@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+﻿cmake_minimum_required(VERSION 3.16)
 project(FightGameOpenWorld LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -23,6 +23,8 @@ if(WIN32)
     target_link_libraries(FightGameOpenWorld PRIVATE
         allegro
         allegro_main
+        allegro_audio
+        allegro_acodec
         allegro_primitives
         allegro_font
         allegro_ttf
@@ -32,6 +34,8 @@ if(WIN32)
         allegro-5.2.dll
         allegro_font-5.2.dll
         allegro_main-5.2.dll
+        allegro_audio-5.2.dll
+        allegro_acodec-5.2.dll
         allegro_primitives-5.2.dll
         allegro_ttf-5.2.dll
     )
@@ -46,9 +50,14 @@ else()
     pkg_check_modules(ALLEGRO REQUIRED IMPORTED_TARGET
         allegro-5
         allegro_main-5
+        allegro_audio-5
+        allegro_acodec-5
         allegro_primitives-5
         allegro_font-5
         allegro_ttf-5
     )
     target_link_libraries(FightGameOpenWorld PRIVATE PkgConfig::ALLEGRO)
 endif()
+
+
+
