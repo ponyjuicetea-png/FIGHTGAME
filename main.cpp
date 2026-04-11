@@ -31,6 +31,7 @@ constexpr float BASE_X = WORLD_PIXEL_W * 0.5f;
 constexpr float BASE_Y = WORLD_PIXEL_H * 0.5f;
 constexpr double FPS = 60.0;
 constexpr const char* SAVE_DIR = "save_slots";
+constexpr const char* META_RUBY_FILE = "meta_rubies.txt";
 
 enum class TileBiome { Grass, Meadow, Water, DarkGrass };
 enum class ResourceType { Tree, Rock, Bush, Crystal };
@@ -182,6 +183,7 @@ struct GameState {
     bool saveExists = false;
     int currentSaveSlot = 1;
     int selectedSaveSlot = 1;
+    int permanentRubies = 0;
     int currentStage = 1;
     int totalWoodGathered = 0;
     int totalStoneGathered = 0;
@@ -199,6 +201,7 @@ struct GameState {
     bool carryingEmerald = false;
     bool emeraldDelivered = false;
     bool darkMageRewardGranted = false;
+    int shrineClaimDay = 0;
     float bossIntroTimer = 0.0f;
     float bossShakeTimer = 0.0f;
     int villageBaseHp = 0;
@@ -227,6 +230,9 @@ Vec2 villageCenter() {
 }
 Vec2 villageBasePos() {
     return { villageCenter().x + 160.0f, villageCenter().y - 40.0f };
+}
+Vec2 shrinePos() {
+    return { BASE_X - 320.0f, BASE_Y + 210.0f };
 }
 Vec2 shopPos() {
     return { BASE_X + 380.0f, BASE_Y + 220.0f };
@@ -279,6 +285,18 @@ bool anySaveFilesExist() {
         if (saveFileExists(slot)) return true;
     }
     return false;
+}
+int loadPermanentRubies() {
+    std::ifstream in(META_RUBY_FILE);
+    int value = 0;
+    if (in) in >> value;
+    return std::max(0, value);
+}
+bool savePermanentRubies(int rubies) {
+    std::ofstream out(META_RUBY_FILE, std::ios::trunc);
+    if (!out) return false;
+    out << std::max(0, rubies) << '\n';
+    return true;
 }
 SavePreview readSavePreview(int slot) {
     SavePreview preview {};
@@ -667,6 +685,7 @@ void startNewGame(GameState& game) {
     game.carryingEmerald = false;
     game.emeraldDelivered = false;
     game.darkMageRewardGranted = false;
+    game.shrineClaimDay = 0;
     game.bossIntroTimer = 0.0f;
     game.bossShakeTimer = 0.0f;
     game.villageBaseHp = 0;
@@ -705,14 +724,14 @@ bool saveGame(GameState& game, int slot) {
     std::ofstream out(saveSlotPath(slot), std::ios::trunc);
     if (!out) return false;
 
-    out << "FGSAVE 11\n";
+    out << "FGSAVE 12\n";
     out << game.day << ' ' << game.dayTimer << ' ' << game.danger << ' ' << game.waveTimer << ' ' << static_cast<int>(game.selectedBuild) << ' ' << game.buildMode << ' ' << static_cast<int>(game.selectedJob) << ' ' << game.shopOpen << ' ' << static_cast<int>(game.activeShop) << '\n';
     out << game.currentStage << ' ' << game.totalWoodGathered << ' ' << game.totalStoneGathered << ' ' << game.totalFiberGathered << ' '
         << game.totalCrystalGathered << ' ' << game.totalMonsterKills << ' ' << game.rescuedChildren << ' ' << game.bossSpawned << ' ' << game.bossDefeated << ' '
         << game.hasSword << ' ' << game.hasArmor << ' ' << game.hasPoisonUpgrade << ' '
         << game.stage4BanditKills << ' ' << game.stage4DarkMageKills << ' ' << game.villageEventStarted << ' ' << game.villageBaseDestroyed << ' '
         << game.emeraldDropped << ' ' << game.carryingEmerald << ' ' << game.emeraldDelivered << ' ' << game.darkMageRewardGranted << ' '
-        << game.villageBaseHp << ' ' << game.villageBaseMaxHp << '\n';
+        << game.villageBaseHp << ' ' << game.villageBaseMaxHp << ' ' << game.shrineClaimDay << '\n';
     out << game.bag.wood << ' ' << game.bag.stone << ' ' << game.bag.fiber << ' ' << game.bag.crystal << ' '
         << game.bag.vegetable << ' ' << game.bag.meat << ' ' << game.bag.fish << ' ' << game.bag.bomb << '\n';
     out << game.player.pos.x << ' ' << game.player.pos.y << ' ' << game.player.facing.x << ' ' << game.player.facing.y << ' '
@@ -756,7 +775,7 @@ bool loadGame(GameState& game, int slot) {
     std::string header;
     int version = 0;
     in >> header >> version;
-    if (!in || header != "FGSAVE" || version != 11) return false;
+    if (!in || header != "FGSAVE" || version != 12) return false;
 
     int selectedBuildInt = 0;
     int selectedJobInt = 0;
@@ -770,7 +789,7 @@ bool loadGame(GameState& game, int slot) {
         >> game.hasSword >> game.hasArmor >> game.hasPoisonUpgrade
         >> game.stage4BanditKills >> game.stage4DarkMageKills >> game.villageEventStarted >> game.villageBaseDestroyed
         >> game.emeraldDropped >> game.carryingEmerald >> game.emeraldDelivered >> game.darkMageRewardGranted
-        >> game.villageBaseHp >> game.villageBaseMaxHp;
+        >> game.villageBaseHp >> game.villageBaseMaxHp >> game.shrineClaimDay;
     game.bossIntroTimer = 0.0f;
     game.bossShakeTimer = 0.0f;
     in >> game.bag.wood >> game.bag.stone >> game.bag.fiber >> game.bag.crystal >> game.bag.vegetable >> game.bag.meat >> game.bag.fish >> game.bag.bomb;
@@ -1003,6 +1022,24 @@ void damageMonster(GameState& game, Monster& monster, int damage) {
 
 void handleGather(GameState& game) {
     if (!game.controls.gather || game.player.gatherCooldown > 0.0f) return;
+
+    if (distance(game.player.pos, shrinePos()) < 78.0f) {
+        if (game.shrineClaimDay != game.day) {
+            game.permanentRubies += 1;
+            game.shrineClaimDay = game.day;
+            game.player.gatherCooldown = 0.35f;
+            if (savePermanentRubies(game.permanentRubies)) {
+                addMessage(game, "你在神社取得了 1 顆永久紅寶石。", 3.6f);
+            } else {
+                addMessage(game, "紅寶石已取得，但寫入永久檔案失敗。", 3.6f);
+            }
+        } else {
+            game.player.gatherCooldown = 0.25f;
+            addMessage(game, "今天已經在神社領過紅寶石了。", 2.8f);
+        }
+        return;
+    }
+
     ResourceNode* best = nullptr;
     float bestDist = 85.0f;
     for (auto& node : game.resources) {
@@ -1722,6 +1759,15 @@ void drawWorld(const GameState& game, ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titl
     al_draw_filled_circle(BASE_X - camera.x, BASE_Y - camera.y, 48.0f, al_map_rgb(222, 187, 84));
     al_draw_circle(BASE_X - camera.x, BASE_Y - camera.y, 58.0f, al_map_rgb(255, 230, 155), 4.0f);
     al_draw_text(titleFont, al_map_rgb(34, 24, 12), BASE_X - camera.x, BASE_Y - camera.y - 16.0f, ALLEGRO_ALIGN_CENTER, "核心");
+    Vec2 shrine = worldToScreen(shrinePos(), camera);
+    al_draw_filled_triangle(shrine.x, shrine.y - 52.0f, shrine.x - 44.0f, shrine.y - 12.0f, shrine.x + 44.0f, shrine.y - 12.0f, al_map_rgb(156, 58, 58));
+    al_draw_filled_rectangle(shrine.x - 34.0f, shrine.y - 12.0f, shrine.x + 34.0f, shrine.y + 34.0f, al_map_rgb(236, 222, 204));
+    al_draw_filled_rectangle(shrine.x - 10.0f, shrine.y - 2.0f, shrine.x + 10.0f, shrine.y + 34.0f, al_map_rgb(118, 72, 52));
+    al_draw_filled_circle(shrine.x, shrine.y - 26.0f, 10.0f, al_map_rgb(214, 38, 56));
+    al_draw_text(bodyFont, al_map_rgb(255, 240, 220), shrine.x, shrine.y - 86.0f, ALLEGRO_ALIGN_CENTER, "神社");
+    if (distance(game.player.pos, shrinePos()) <= 96.0f) {
+        al_draw_circle(shrine.x, shrine.y - 6.0f, 58.0f, al_map_rgba(255, 120, 140, 140), 3.0f);
+    }
     if (game.currentStage >= 4) {
         Vec2 village = worldToScreen(villageCenter(), camera);
         Vec2 base = worldToScreen(villageBasePos(), camera);
@@ -1975,6 +2021,7 @@ void drawUi(const GameState& game, ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titleFo
     al_draw_textf(bodyFont, al_map_rgb(201, 226, 255), 38.0f, 78.0f, 0, "第 %d 天  %s", game.day, isNight(game) ? "夜襲中" : "白天探索");
     al_draw_textf(bodyFont, al_map_rgb(201, 226, 255), 38.0f, 110.0f, 0, "等級 %d  經驗 %d/%d", game.player.level, game.player.xp, game.player.xpToNext);
     al_draw_textf(bodyFont, al_map_rgb(201, 226, 255), 38.0f, 142.0f, 0, "怪物 %d  危險值 %.1f", static_cast<int>(game.monsters.size()), game.danger);
+    al_draw_textf(bodyFont, al_map_rgb(255, 108, 126), 38.0f, 174.0f, 0, "永久紅寶石 %d", game.permanentRubies);
 
     drawProgressBar(552.0f, 24.0f, 320.0f, 22.0f, static_cast<float>(game.player.hp) / game.player.maxHp, al_map_rgba(20, 20, 20, 190), al_map_rgb(222, 88, 88));
     al_draw_textf(bodyFont, al_map_rgb(255, 255, 255), 560.0f, 48.0f, 0, "生命 %d / %d", game.player.hp, game.player.maxHp);
@@ -1988,7 +2035,7 @@ void drawUi(const GameState& game, ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titleFo
     al_draw_filled_rounded_rectangle(18.0f, SCREEN_H - 176.0f, 900.0f, SCREEN_H - 18.0f, 16.0f, 16.0f, al_map_rgba(8, 12, 16, 210));
     al_draw_textf(bodyFont, al_map_rgb(255, 238, 205), 36.0f, SCREEN_H - 160.0f, 0, "木材 %d   石材 %d   纖維 %d   水晶 %d   菜 %d   肉 %d   魚 %d   炸彈 %d", game.bag.wood, game.bag.stone, game.bag.fiber, game.bag.crystal, game.bag.vegetable, game.bag.meat, game.bag.fish, game.bag.bomb);
     al_draw_textf(bodyFont, al_map_rgb(214, 230, 240), 36.0f, SCREEN_H - 124.0f, 0, "職業：%s   目前建築：%s   模式：%s   裝備：%s%s%s", jobName(game.player.jobClass), buildName(game.selectedBuild), game.buildMode ? "建造" : "戰鬥", game.hasSword ? "劍 " : "", game.hasArmor ? "盔甲 " : "", game.hasPoisonUpgrade ? "毒藥強化" : "");
-    al_draw_text(bodyFont, al_map_rgb(170, 202, 221), 36.0f, SCREEN_H - 92.0f, 0, "WASD 移動   E 採集   Space 近戰   滑鼠左鍵 射擊 / 放置   G 毒藥水   H 釣魚   T 丟炸彈");
+    al_draw_text(bodyFont, al_map_rgb(170, 202, 221), 36.0f, SCREEN_H - 92.0f, 0, "WASD 移動   E 採集 / 神社領紅寶石   Space 近戰   滑鼠左鍵 射擊 / 放置   G 毒藥水   H 釣魚   T 丟炸彈");
     al_draw_text(bodyFont, al_map_rgb(170, 202, 221), 36.0f, SCREEN_H - 60.0f, 0, "Q 建造模式   1 圍牆   2 砲塔   3 營地   4 黑暗小法師   R 吃食物   J 職業技能   靠近街店可交易");
 
     al_draw_filled_rounded_rectangle(860.0f, 18.0f, SCREEN_W - 18.0f, 320.0f, 16.0f, 16.0f, al_map_rgba(8, 12, 16, 210));
@@ -2092,6 +2139,7 @@ void drawTitle(const GameState& game, ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titl
     al_draw_textf(bodyFont, game.saveExists ? al_map_rgb(235, 240, 246) : al_map_rgb(140, 150, 160), SCREEN_W * 0.5f, 664.0f, ALLEGRO_ALIGN_CENTER, "L：載入遊戲%s", game.saveExists ? "" : "（目前沒有存檔）");
     al_draw_text(bodyFont, al_map_rgb(235, 240, 246), SCREEN_W * 0.5f, 702.0f, ALLEGRO_ALIGN_CENTER, "Enter：以目前職業開始   L：載入遊戲   ESC：離開");
     al_draw_textf(bodyFont, al_map_rgb(180, 204, 222), SCREEN_W * 0.5f, 738.0f, ALLEGRO_ALIGN_CENTER, "目前選擇：%s  %s", jobName(game.selectedJob), jobDescription(game.selectedJob));
+    al_draw_textf(bodyFont, al_map_rgb(255, 112, 132), SCREEN_W * 0.5f, 774.0f, ALLEGRO_ALIGN_CENTER, "帳號永久紅寶石：%d", game.permanentRubies);
 }
 
 void drawPauseMenu(ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titleFont) {
@@ -2431,6 +2479,7 @@ int main() {
     al_register_event_source(queue, al_get_timer_event_source(timer));
 
     GameState game {};
+    game.permanentRubies = loadPermanentRubies();
     game.saveExists = anySaveFilesExist();
     bool redraw = true;
     al_start_timer(timer);
