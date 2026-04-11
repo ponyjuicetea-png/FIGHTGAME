@@ -232,7 +232,7 @@ Vec2 villageBasePos() {
     return { villageCenter().x + 160.0f, villageCenter().y - 40.0f };
 }
 Vec2 shrinePos() {
-    return { BASE_X - 320.0f, BASE_Y + 210.0f };
+    return { BASE_X, 260.0f };
 }
 Vec2 shopPos() {
     return { BASE_X + 380.0f, BASE_Y + 220.0f };
@@ -470,6 +470,24 @@ void setupRescueChildren(GameState& game) {
     game.children.push_back({ { WORLD_PIXEL_W - 620.0f, WORLD_PIXEL_H - 620.0f }, false });
     game.rescuedChildren = 0;
 }
+void spawnShrineDarkMages(GameState& game) {
+    const std::array<Vec2, 4> shrineMages = {{
+        { shrinePos().x - 120.0f, shrinePos().y + 40.0f },
+        { shrinePos().x + 120.0f, shrinePos().y + 30.0f },
+        { shrinePos().x - 56.0f, shrinePos().y + 132.0f },
+        { shrinePos().x + 62.0f, shrinePos().y + 144.0f }
+    }};
+    for (const auto& pos : shrineMages) {
+        Monster mage {};
+        mage.type = MonsterType::DarkMage;
+        mage.pos = pos;
+        mage.hp = mage.maxHp = 180;
+        mage.damage = 15;
+        mage.speed = 80.0f;
+        mage.attackCooldown = randf(game, 0.1f, 1.0f);
+        game.monsters.push_back(mage);
+    }
+}
 void setupVillageEncounter(GameState& game) {
     game.villageEventStarted = true;
     game.villageBaseDestroyed = false;
@@ -482,8 +500,9 @@ void setupVillageEncounter(GameState& game) {
     game.villageBaseMaxHp = 380;
     game.villageBaseHp = 380;
 
-    const std::array<Vec2, 3> mageSpawns = {{
-        { villageCenter().x - 160.0f, villageCenter().y - 120.0f },
+    const std::array<Vec2, 4> mageSpawns = {{
+        { shrinePos().x - 120.0f, shrinePos().y + 40.0f },
+        { shrinePos().x + 120.0f, shrinePos().y + 30.0f },
         { villageCenter().x + 10.0f, villageCenter().y + 80.0f },
         { villageCenter().x + 180.0f, villageCenter().y - 150.0f }
     }};
@@ -713,6 +732,7 @@ void startNewGame(GameState& game) {
     game.minions.clear();
     game.monsters.clear();
     seedWorld(game);
+    spawnShrineDarkMages(game);
     if (game.selectedJob == JobClass::Fisher) setupFishingBoats(game);
     resetCoreCamp(game);
     refreshDifficulty(game);
@@ -855,6 +875,7 @@ bool loadGame(GameState& game, int slot) {
     game.boats.clear();
     game.minions.clear();
     game.monsters.clear();
+    if (game.currentStage == 1) spawnShrineDarkMages(game);
     if (game.player.jobClass == JobClass::Fisher) setupFishingBoats(game);
     game.scene = Scene::Playing;
     game.autoSaveTimer = 0.0f;
@@ -1024,7 +1045,10 @@ void handleGather(GameState& game) {
     if (!game.controls.gather || game.player.gatherCooldown > 0.0f) return;
 
     if (distance(game.player.pos, shrinePos()) < 78.0f) {
-        if (game.shrineClaimDay != game.day) {
+        if (game.stage4DarkMageKills < 4) {
+            game.player.gatherCooldown = 0.25f;
+            addMessage(game, ("神社封印尚未解除，必須先打敗 4 隻黑暗大法師。目前 " + std::to_string(game.stage4DarkMageKills) + " / 4。"), 3.8f);
+        } else if (game.shrineClaimDay != game.day) {
             game.permanentRubies += 1;
             game.shrineClaimDay = game.day;
             game.player.gatherCooldown = 0.35f;
@@ -2046,7 +2070,8 @@ void drawUi(const GameState& game, ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titleFo
             "第一關：建立前線基地\n"
             "累計採集木材 50 / " + std::to_string(game.totalWoodGathered) + "\n"
             "累計採集石材 36 / " + std::to_string(game.totalStoneGathered) + "\n"
-            "存活圍牆 6 / " + std::to_string(countBuildingsOfType(game, BuildingType::Wall));
+            "存活圍牆 6 / " + std::to_string(countBuildingsOfType(game, BuildingType::Wall)) + "\n"
+            "神社黑暗大法師 4 / " + std::to_string(std::min(game.stage4DarkMageKills, 4));
     } else if (game.currentStage == 2) {
         objectiveText =
             "第二關：鞏固防線並清怪\n"
