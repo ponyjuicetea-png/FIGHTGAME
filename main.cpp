@@ -9,7 +9,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <random>
 #include <string>
@@ -28,7 +30,7 @@ constexpr float PLAYER_RADIUS = 18.0f;
 constexpr float BASE_X = WORLD_PIXEL_W * 0.5f;
 constexpr float BASE_Y = WORLD_PIXEL_H * 0.5f;
 constexpr double FPS = 60.0;
-constexpr const char* SAVE_FILE = "savegame.dat";
+constexpr const char* SAVE_DIR = "save_slots";
 
 enum class TileBiome { Grass, Meadow, Water, DarkGrass };
 enum class ResourceType { Tree, Rock, Bush, Crystal };
@@ -37,6 +39,7 @@ enum class MonsterType { Slime, Hunter, Brute, DarkMage, Boss };
 enum class Scene { Title, Playing, GameOver, Victory };
 enum class JobClass { Drifter, Vampire, Lumberjack, Fisher, Alien, Elite };
 enum class ShopType { None, Bomb, Grocery, Tool };
+enum class SlotMenuMode { None, Save, Load };
 
 struct Vec2 { float x = 0.0f; float y = 0.0f; };
 struct Inventory {
@@ -173,8 +176,12 @@ struct GameState {
     bool buildMode = false;
     bool shopOpen = false;
     ShopType activeShop = ShopType::None;
+    SlotMenuMode slotMenuMode = SlotMenuMode::None;
+    bool pauseMenuOpen = false;
     bool running = true;
     bool saveExists = false;
+    int currentSaveSlot = 1;
+    int selectedSaveSlot = 1;
     int currentStage = 1;
     int totalWoodGathered = 0;
     int totalStoneGathered = 0;
@@ -245,6 +252,13 @@ ALLEGRO_SAMPLE* gPoisonPotionSample = nullptr;
 ALLEGRO_SAMPLE* gRescueChildSample = nullptr;
 ALLEGRO_SAMPLE* gBombThrowSample = nullptr;
 
+struct SavePreview {
+    bool exists = false;
+    int day = 0;
+    int stage = 0;
+    JobClass job = JobClass::Drifter;
+};
+
 float clampf(float v, float lo, float hi) { return std::max(lo, std::min(v, hi)); }
 float length(Vec2 v) { return std::sqrt(v.x * v.x + v.y * v.y); }
 Vec2 normalize(Vec2 v) { float len = length(v); return len <= 0.0001f ? Vec2 { 0.0f, 0.0f } : Vec2 { v.x / len, v.y / len }; }
@@ -254,7 +268,41 @@ Vec2 sub(Vec2 a, Vec2 b) { return { a.x - b.x, a.y - b.y }; }
 Vec2 mul(Vec2 a, float s) { return { a.x * s, a.y * s }; }
 float randf(GameState& game, float minValue, float maxValue) { std::uniform_real_distribution<float> dist(minValue, maxValue); return dist(game.rng); }
 int randi(GameState& game, int minValue, int maxValue) { std::uniform_int_distribution<int> dist(minValue, maxValue); return dist(game.rng); }
-bool saveFileExists() { std::ifstream input(SAVE_FILE); return input.good(); }
+std::string saveSlotPath(int slot) {
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%s/slot%03d.txt", SAVE_DIR, slot);
+    return buffer;
+}
+bool saveFileExists(int slot) { std::ifstream input(saveSlotPath(slot)); return input.good(); }
+bool anySaveFilesExist() {
+    for (int slot = 1; slot <= 100; ++slot) {
+        if (saveFileExists(slot)) return true;
+    }
+    return false;
+}
+SavePreview readSavePreview(int slot) {
+    SavePreview preview {};
+    std::ifstream in(saveSlotPath(slot));
+    if (!in) return preview;
+    std::string header;
+    int version = 0;
+    int selectedBuildInt = 0;
+    int selectedJobInt = 0;
+    bool buildMode = false;
+    bool shopOpen = false;
+    int activeShopInt = 0;
+    in >> header >> version;
+    if (!in || header != "FGSAVE") return preview;
+    preview.exists = true;
+    in >> preview.day;
+    float dayTimer = 0.0f;
+    float danger = 0.0f;
+    float waveTimer = 0.0f;
+    in >> dayTimer >> danger >> waveTimer >> selectedBuildInt >> buildMode >> selectedJobInt >> shopOpen >> activeShopInt;
+    in >> preview.stage;
+    preview.job = static_cast<JobClass>(selectedJobInt);
+    return preview;
+}
 bool isNight(const GameState& game) { return game.dayTimer >= 95.0f; }
 float difficultyFactor(const GameState& game) {
     float dayCurve = 1.0f + (game.day - 1) * 0.28f + std::pow(static_cast<float>(game.day), 1.12f) * 0.09f;
@@ -600,6 +648,8 @@ void startNewGame(GameState& game) {
     game.buildMode = false;
     game.shopOpen = false;
     game.activeShop = ShopType::None;
+    game.slotMenuMode = SlotMenuMode::None;
+    game.pauseMenuOpen = false;
     game.currentStage = 1;
     game.totalWoodGathered = 0;
     game.totalStoneGathered = 0;
@@ -635,6 +685,7 @@ void startNewGame(GameState& game) {
     game.hasSword = false;
     game.hasArmor = false;
     game.hasPoisonUpgrade = false;
+    game.currentSaveSlot = game.selectedSaveSlot;
     game.message = "第一關：採集資源並建立初步防線。";
     game.projectiles.clear();
     game.poisonClouds.clear();
@@ -649,8 +700,9 @@ void startNewGame(GameState& game) {
     clearControls(game);
 }
 
-bool saveGame(const GameState& game) {
-    std::ofstream out(SAVE_FILE, std::ios::trunc);
+bool saveGame(GameState& game, int slot) {
+    std::filesystem::create_directories(SAVE_DIR);
+    std::ofstream out(saveSlotPath(slot), std::ios::trunc);
     if (!out) return false;
 
     out << "FGSAVE 11\n";
@@ -688,11 +740,17 @@ bool saveGame(const GameState& game) {
     for (const auto& child : game.children) {
         out << child.pos.x << ' ' << child.pos.y << ' ' << child.rescued << '\n';
     }
+    game.currentSaveSlot = slot;
+    game.selectedSaveSlot = slot;
     return true;
 }
 
-bool loadGame(GameState& game) {
-    std::ifstream in(SAVE_FILE);
+bool saveGame(GameState& game) {
+    return saveGame(game, game.currentSaveSlot);
+}
+
+bool loadGame(GameState& game, int slot) {
+    std::ifstream in(saveSlotPath(slot));
     if (!in) return false;
 
     std::string header;
@@ -782,11 +840,18 @@ bool loadGame(GameState& game) {
     game.scene = Scene::Playing;
     game.autoSaveTimer = 0.0f;
     game.frontGateAlertTimer = 0.0f;
+    game.pauseMenuOpen = false;
+    game.slotMenuMode = SlotMenuMode::None;
     game.messageTimer = 5.0f;
     game.message = "已載入存檔，繼續完成目前關卡。";
+    game.currentSaveSlot = slot;
+    game.selectedSaveSlot = slot;
     refreshDifficulty(game);
     clearControls(game);
     return true;
+}
+bool loadGame(GameState& game) {
+    return loadGame(game, game.selectedSaveSlot);
 }
 
 void spawnMonster(GameState& game, int count) {
@@ -2024,9 +2089,49 @@ void drawTitle(const GameState& game, ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titl
     al_draw_textf(bodyFont, jobColor(JobClass::Fisher, al_map_rgb(182, 230, 255), al_map_rgb(210, 220, 228)), SCREEN_W * 0.5f, 549.0f, ALLEGRO_ALIGN_CENTER, "4：漁夫  K 放船，船會自動開火");
     al_draw_textf(bodyFont, jobColor(JobClass::Alien, al_map_rgb(210, 255, 255), al_map_rgb(210, 220, 228)), SCREEN_W * 0.5f, 586.0f, ALLEGRO_ALIGN_CENTER, "5：外星人  J 八連砲，K 每 30 秒召喚小兵");
     al_draw_textf(bodyFont, jobColor(JobClass::Elite, al_map_rgb(255, 216, 120), al_map_rgb(210, 220, 228)), SCREEN_W * 0.5f, 623.0f, ALLEGRO_ALIGN_CENTER, "6：菁英  減少受到的傷害，毒藥傷害與持續時間更高");
-    al_draw_textf(bodyFont, game.saveExists ? al_map_rgb(235, 240, 246) : al_map_rgb(140, 150, 160), SCREEN_W * 0.5f, 664.0f, ALLEGRO_ALIGN_CENTER, "C：繼續遊戲%s", game.saveExists ? "" : "（目前沒有存檔）");
-    al_draw_text(bodyFont, al_map_rgb(235, 240, 246), SCREEN_W * 0.5f, 702.0f, ALLEGRO_ALIGN_CENTER, "Enter：以目前職業開始   F5/F9：存讀檔   ESC：離開");
+    al_draw_textf(bodyFont, game.saveExists ? al_map_rgb(235, 240, 246) : al_map_rgb(140, 150, 160), SCREEN_W * 0.5f, 664.0f, ALLEGRO_ALIGN_CENTER, "L：載入遊戲%s", game.saveExists ? "" : "（目前沒有存檔）");
+    al_draw_text(bodyFont, al_map_rgb(235, 240, 246), SCREEN_W * 0.5f, 702.0f, ALLEGRO_ALIGN_CENTER, "Enter：以目前職業開始   L：載入遊戲   ESC：離開");
     al_draw_textf(bodyFont, al_map_rgb(180, 204, 222), SCREEN_W * 0.5f, 738.0f, ALLEGRO_ALIGN_CENTER, "目前選擇：%s  %s", jobName(game.selectedJob), jobDescription(game.selectedJob));
+}
+
+void drawPauseMenu(ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titleFont) {
+    al_draw_filled_rectangle(0.0f, 0.0f, SCREEN_W, SCREEN_H, al_map_rgba(0, 0, 0, 150));
+    al_draw_filled_rounded_rectangle(540.0f, 250.0f, 1060.0f, 560.0f, 20.0f, 20.0f, al_map_rgba(14, 16, 22, 238));
+    al_draw_text(titleFont, al_map_rgb(255, 236, 198), SCREEN_W * 0.5f, 282.0f, ALLEGRO_ALIGN_CENTER, "暫停選單");
+    al_draw_text(bodyFont, al_map_rgb(232, 238, 244), SCREEN_W * 0.5f, 360.0f, ALLEGRO_ALIGN_CENTER, "Enter：繼續遊戲");
+    al_draw_text(bodyFont, al_map_rgb(232, 238, 244), SCREEN_W * 0.5f, 404.0f, ALLEGRO_ALIGN_CENTER, "S：開啟存檔清單");
+    al_draw_text(bodyFont, al_map_rgb(232, 238, 244), SCREEN_W * 0.5f, 448.0f, ALLEGRO_ALIGN_CENTER, "L：開啟讀檔清單");
+    al_draw_text(bodyFont, al_map_rgb(232, 238, 244), SCREEN_W * 0.5f, 492.0f, ALLEGRO_ALIGN_CENTER, "ESC：關閉選單");
+}
+
+void drawSlotMenu(const GameState& game, ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titleFont) {
+    al_draw_filled_rectangle(0.0f, 0.0f, SCREEN_W, SCREEN_H, al_map_rgba(0, 0, 0, 170));
+    al_draw_filled_rounded_rectangle(120.0f, 80.0f, SCREEN_W - 120.0f, SCREEN_H - 80.0f, 22.0f, 22.0f, al_map_rgba(10, 14, 20, 240));
+    al_draw_text(titleFont, al_map_rgb(255, 234, 194), SCREEN_W * 0.5f, 96.0f, ALLEGRO_ALIGN_CENTER, game.slotMenuMode == SlotMenuMode::Save ? "存檔清單 100 格" : "載入遊戲 100 格");
+    al_draw_textf(bodyFont, al_map_rgb(204, 220, 236), SCREEN_W * 0.5f, 142.0f, ALLEGRO_ALIGN_CENTER, "方向鍵移動  Enter%s  ESC返回", game.slotMenuMode == SlotMenuMode::Save ? "存檔" : "讀檔");
+
+    const float startX = 150.0f;
+    const float startY = 190.0f;
+    const float cellW = 128.0f;
+    const float cellH = 56.0f;
+    for (int slot = 1; slot <= 100; ++slot) {
+        int idx = slot - 1;
+        int col = idx % 10;
+        int row = idx / 10;
+        float x = startX + col * cellW;
+        float y = startY + row * cellH;
+        bool selected = game.selectedSaveSlot == slot;
+        SavePreview preview = readSavePreview(slot);
+        ALLEGRO_COLOR fill = selected ? al_map_rgba(70, 106, 156, 220) : al_map_rgba(24, 28, 36, 220);
+        al_draw_filled_rounded_rectangle(x, y, x + 112.0f, y + 42.0f, 10.0f, 10.0f, fill);
+        al_draw_rounded_rectangle(x, y, x + 112.0f, y + 42.0f, 10.0f, 10.0f, preview.exists ? al_map_rgb(184, 214, 255) : al_map_rgb(96, 106, 118), 2.0f);
+        if (preview.exists) {
+            al_draw_textf(bodyFont, al_map_rgb(255, 248, 226), x + 10.0f, y + 4.0f, 0, "%03d D%d", slot, preview.day);
+            al_draw_textf(bodyFont, al_map_rgb(208, 226, 240), x + 10.0f, y + 22.0f, 0, "關%d %s", preview.stage, jobName(preview.job));
+        } else {
+            al_draw_textf(bodyFont, al_map_rgb(220, 224, 232), x + 10.0f, y + 10.0f, 0, "%03d 空格", slot);
+        }
+    }
 }
 
 void drawGameOver(const GameState& game, ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titleFont) {
@@ -2326,7 +2431,7 @@ int main() {
     al_register_event_source(queue, al_get_timer_event_source(timer));
 
     GameState game {};
-    game.saveExists = saveFileExists();
+    game.saveExists = anySaveFilesExist();
     bool redraw = true;
     al_start_timer(timer);
 
@@ -2355,6 +2460,24 @@ int main() {
             if (event.mouse.button == 1) game.controls.shoot = false;
         } else if (event.type == ALLEGRO_EVENT_KEY_DOWN) {
             if (game.scene == Scene::Title) {
+                if (game.slotMenuMode != SlotMenuMode::None) {
+                    switch (event.keyboard.keycode) {
+                        case ALLEGRO_KEY_UP: if (game.selectedSaveSlot > 10) game.selectedSaveSlot -= 10; break;
+                        case ALLEGRO_KEY_DOWN: if (game.selectedSaveSlot <= 90) game.selectedSaveSlot += 10; break;
+                        case ALLEGRO_KEY_LEFT: if ((game.selectedSaveSlot - 1) % 10 != 0) game.selectedSaveSlot -= 1; break;
+                        case ALLEGRO_KEY_RIGHT: if (game.selectedSaveSlot % 10 != 0) game.selectedSaveSlot += 1; break;
+                        case ALLEGRO_KEY_ENTER:
+                            if (saveFileExists(game.selectedSaveSlot) && loadGame(game, game.selectedSaveSlot)) {
+                                game.saveExists = anySaveFilesExist();
+                                addMessage(game, "已載入選擇的存檔。", 4.0f);
+                            } else {
+                                addMessage(game, "這個存檔格目前沒有資料。", 3.0f);
+                            }
+                            break;
+                        case ALLEGRO_KEY_ESCAPE: game.slotMenuMode = SlotMenuMode::None; break;
+                        default: break;
+                    }
+                } else {
                 switch (event.keyboard.keycode) {
                     case ALLEGRO_KEY_ENTER: startNewGame(game); break;
                     case ALLEGRO_KEY_1: game.selectedJob = JobClass::Drifter; break;
@@ -2363,25 +2486,63 @@ int main() {
                     case ALLEGRO_KEY_4: game.selectedJob = JobClass::Fisher; break;
                     case ALLEGRO_KEY_5: game.selectedJob = JobClass::Alien; break;
                     case ALLEGRO_KEY_6: game.selectedJob = JobClass::Elite; break;
-                    case ALLEGRO_KEY_C: if (game.saveExists && loadGame(game)) addMessage(game, "已載入存檔，回到戰場。", 4.0f); break;
+                    case ALLEGRO_KEY_L: if (game.saveExists) game.slotMenuMode = SlotMenuMode::Load; break;
                     case ALLEGRO_KEY_ESCAPE: game.running = false; break;
                     default: break;
                 }
+                }
             } else if (game.scene == Scene::GameOver) {
                 switch (event.keyboard.keycode) {
-                    case ALLEGRO_KEY_ENTER: game.scene = Scene::Title; game.saveExists = saveFileExists(); clearControls(game); break;
-                    case ALLEGRO_KEY_C: if (game.saveExists && loadGame(game)) addMessage(game, "已從存檔重新投入防守。", 4.0f); break;
+                    case ALLEGRO_KEY_ENTER: game.scene = Scene::Title; game.saveExists = anySaveFilesExist(); clearControls(game); break;
+                    case ALLEGRO_KEY_L: if (game.saveExists) game.slotMenuMode = SlotMenuMode::Load; break;
                     case ALLEGRO_KEY_ESCAPE: game.running = false; break;
                     default: break;
                 }
             } else if (game.scene == Scene::Victory) {
                 switch (event.keyboard.keycode) {
-                    case ALLEGRO_KEY_ENTER: game.scene = Scene::Title; game.saveExists = saveFileExists(); clearControls(game); break;
-                    case ALLEGRO_KEY_C: if (game.saveExists && loadGame(game)) addMessage(game, "已讀取通關前存檔。", 4.0f); break;
+                    case ALLEGRO_KEY_ENTER: game.scene = Scene::Title; game.saveExists = anySaveFilesExist(); clearControls(game); break;
+                    case ALLEGRO_KEY_L: if (game.saveExists) game.slotMenuMode = SlotMenuMode::Load; break;
                     case ALLEGRO_KEY_ESCAPE: game.running = false; break;
                     default: break;
                 }
             } else {
+                if (game.slotMenuMode != SlotMenuMode::None) {
+                    switch (event.keyboard.keycode) {
+                        case ALLEGRO_KEY_UP: if (game.selectedSaveSlot > 10) game.selectedSaveSlot -= 10; break;
+                        case ALLEGRO_KEY_DOWN: if (game.selectedSaveSlot <= 90) game.selectedSaveSlot += 10; break;
+                        case ALLEGRO_KEY_LEFT: if ((game.selectedSaveSlot - 1) % 10 != 0) game.selectedSaveSlot -= 1; break;
+                        case ALLEGRO_KEY_RIGHT: if (game.selectedSaveSlot % 10 != 0) game.selectedSaveSlot += 1; break;
+                        case ALLEGRO_KEY_ENTER:
+                            if (game.slotMenuMode == SlotMenuMode::Save) {
+                                if (saveGame(game, game.selectedSaveSlot)) {
+                                    game.saveExists = anySaveFilesExist();
+                                    game.slotMenuMode = SlotMenuMode::None;
+                                    game.pauseMenuOpen = false;
+                                    addMessage(game, "已存到選擇的存檔格。", 3.0f);
+                                } else {
+                                    addMessage(game, "存檔失敗。", 3.0f);
+                                }
+                            } else {
+                                if (saveFileExists(game.selectedSaveSlot) && loadGame(game, game.selectedSaveSlot)) {
+                                    game.saveExists = anySaveFilesExist();
+                                    addMessage(game, "已讀取選擇的存檔格。", 3.0f);
+                                } else {
+                                    addMessage(game, "這個存檔格目前沒有資料。", 3.0f);
+                                }
+                            }
+                            break;
+                        case ALLEGRO_KEY_ESCAPE: game.slotMenuMode = SlotMenuMode::None; break;
+                        default: break;
+                    }
+                } else if (game.pauseMenuOpen) {
+                    switch (event.keyboard.keycode) {
+                        case ALLEGRO_KEY_ENTER: game.pauseMenuOpen = false; break;
+                        case ALLEGRO_KEY_S: game.slotMenuMode = SlotMenuMode::Save; break;
+                        case ALLEGRO_KEY_L: game.slotMenuMode = SlotMenuMode::Load; break;
+                        case ALLEGRO_KEY_ESCAPE: game.pauseMenuOpen = false; break;
+                        default: break;
+                    }
+                } else {
                 switch (event.keyboard.keycode) {
                     case ALLEGRO_KEY_W: game.controls.up = true; break;
                     case ALLEGRO_KEY_S: game.controls.down = true; break;
@@ -2593,10 +2754,11 @@ int main() {
                             game.selectedBuild = BuildingType::Camp;
                         }
                         break;
-                    case ALLEGRO_KEY_F5: if (saveGame(game)) { game.saveExists = true; addMessage(game, "遊戲已存檔。", 3.0f); } else addMessage(game, "存檔失敗。", 3.0f); break;
-                    case ALLEGRO_KEY_F9: if (loadGame(game)) game.saveExists = true; else addMessage(game, "讀檔失敗或沒有找到存檔。", 3.0f); break;
-                    case ALLEGRO_KEY_ESCAPE: game.scene = Scene::Title; game.saveExists = saveFileExists(); clearControls(game); break;
+                    case ALLEGRO_KEY_F5: if (saveGame(game, game.currentSaveSlot)) { game.saveExists = anySaveFilesExist(); addMessage(game, "遊戲已存到目前存檔格。", 3.0f); } else addMessage(game, "存檔失敗。", 3.0f); break;
+                    case ALLEGRO_KEY_F9: if (loadGame(game, game.currentSaveSlot)) game.saveExists = anySaveFilesExist(); else addMessage(game, "讀檔失敗或目前存檔格沒有資料。", 3.0f); break;
+                    case ALLEGRO_KEY_ESCAPE: game.pauseMenuOpen = true; game.slotMenuMode = SlotMenuMode::None; clearControls(game); break;
                     default: break;
+                }
                 }
             }
         } else if (event.type == ALLEGRO_EVENT_KEY_UP && game.scene == Scene::Playing) {
@@ -2611,7 +2773,7 @@ int main() {
                 default: break;
             }
         } else if (event.type == ALLEGRO_EVENT_TIMER) {
-            if (game.scene == Scene::Playing) {
+            if (game.scene == Scene::Playing && !game.pauseMenuOpen && game.slotMenuMode == SlotMenuMode::None) {
                 float dt = 1.0f / static_cast<float>(FPS);
                 updateFlow(game, dt);
                 updatePlayer(game, dt);
@@ -2626,7 +2788,7 @@ int main() {
                 cleanupDead(game);
                 if (game.player.hp <= 0 || game.player.cores <= 0) {
                     saveGame(game);
-                    game.saveExists = true;
+                    game.saveExists = anySaveFilesExist();
                     game.scene = Scene::GameOver;
                     clearControls(game);
                 }
@@ -2640,10 +2802,13 @@ int main() {
             redraw = false;
             if (game.scene == Scene::Title) {
                 drawTitle(game, bodyFont, titleFont);
+                if (game.slotMenuMode != SlotMenuMode::None) drawSlotMenu(game, bodyFont, titleFont);
             } else {
                 al_clear_to_color(al_map_rgb(15, 18, 26));
                 drawWorld(game, bodyFont, titleFont);
                 drawUi(game, bodyFont, titleFont);
+                if (game.pauseMenuOpen) drawPauseMenu(bodyFont, titleFont);
+                if (game.slotMenuMode != SlotMenuMode::None) drawSlotMenu(game, bodyFont, titleFont);
                 if (game.scene == Scene::GameOver) drawGameOver(game, bodyFont, titleFont);
                 if (game.scene == Scene::Victory) drawVictory(game, bodyFont, titleFont);
             }
