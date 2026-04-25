@@ -32,7 +32,7 @@ constexpr float BASE_Y = WORLD_PIXEL_H * 0.5f;
 constexpr double FPS = 60.0;
 constexpr const char* SAVE_DIR = "save_slots";
 constexpr const char* META_RUBY_FILE = "meta_rubies.txt";
-#define SHRINE_DARK_MAGE_SUMMON_COUNT 8
+#define SHRINE_DARK_MAGE_SUMMON_COUNT 4
 
 enum class TileBiome { Grass, Meadow, Water, DarkGrass };
 enum class ResourceType { Tree, Rock, Bush, Crystal };
@@ -205,8 +205,10 @@ struct GameState {
     bool darkMageRewardGranted = false;
     int shrineClaimDay = 0;
     bool shrineDarkMagesSummoned = false;
+    bool inCultFortress = false;
     float bossIntroTimer = 0.0f;
     float bossShakeTimer = 0.0f;
+    float teleportCooldown = 0.0f;
     int villageBaseHp = 0;
     int villageBaseMaxHp = 0;
     int day = 1;
@@ -236,6 +238,19 @@ Vec2 villageBasePos() {
 }
 Vec2 shrinePos() {
     return { BASE_X, 260.0f };
+}
+Vec2 cultPortalPos() {
+    return { BASE_X - 420.0f, BASE_Y + 220.0f };
+}
+Vec2 cultFortressCenter() {
+    return { 760.0f, WORLD_PIXEL_H - 860.0f };
+}
+Vec2 cultFortressPortalPos() {
+    return { cultFortressCenter().x, cultFortressCenter().y + 250.0f };
+}
+bool inCultFortressArea(Vec2 pos) {
+    return std::abs(pos.x - cultFortressCenter().x) <= 460.0f
+        && std::abs(pos.y - cultFortressCenter().y) <= 360.0f;
 }
 Vec2 shopPos() {
     return { BASE_X + 380.0f, BASE_Y + 220.0f };
@@ -334,7 +349,9 @@ float difficultyFactor(const GameState& game) {
     else if (game.currentStage == 3) stageBonus = 1.2f + game.day * 0.04f;
     else if (game.currentStage == 4) stageBonus = 1.5f + game.day * 0.05f + (game.emeraldDelivered ? 0.45f : 0.15f);
     else if (game.currentStage == 5) stageBonus = 1.95f + game.day * 0.05f + (game.bossSpawned ? 0.9f : 0.35f);
-    return dayCurve + nightBonus + raidBonus + stageBonus;
+    float result = dayCurve + nightBonus + raidBonus + stageBonus;
+    if (game.inCultFortress) result *= 2.0f;
+    return result;
 }
 ALLEGRO_COLOR biomeColor(TileBiome biome) {
     switch (biome) {
@@ -600,6 +617,23 @@ void grantXp(GameState& game, int amount) {
     }
 }
 
+void paintCultFortressArea(GameState& game) {
+    int left = std::max(0, static_cast<int>((cultFortressCenter().x - 500.0f) / TILE_SIZE));
+    int right = std::min(WORLD_W - 1, static_cast<int>((cultFortressCenter().x + 500.0f) / TILE_SIZE));
+    int top = std::max(0, static_cast<int>((cultFortressCenter().y - 390.0f) / TILE_SIZE));
+    int bottom = std::min(WORLD_H - 1, static_cast<int>((cultFortressCenter().y + 390.0f) / TILE_SIZE));
+    for (int y = top; y <= bottom; ++y) {
+        for (int x = left; x <= right; ++x) {
+            float wx = x * TILE_SIZE + TILE_SIZE * 0.5f;
+            float wy = y * TILE_SIZE + TILE_SIZE * 0.5f;
+            float dx = std::abs(wx - cultFortressCenter().x);
+            float dy = std::abs(wy - cultFortressCenter().y);
+            if (dx < 390.0f && dy < 300.0f) game.map[y][x] = TileBiome::DarkGrass;
+            if (dx < 210.0f && dy < 150.0f) game.map[y][x] = TileBiome::Meadow;
+        }
+    }
+}
+
 void seedWorld(GameState& game) {
     game.map.assign(WORLD_H, std::vector<TileBiome>(WORLD_W, TileBiome::Grass));
     for (int y = 0; y < WORLD_H; ++y) {
@@ -620,6 +654,7 @@ void seedWorld(GameState& game) {
             if (x >= 0 && y >= 0 && x < WORLD_W && y < WORLD_H) game.map[y][x] = TileBiome::Meadow;
         }
     }
+    paintCultFortressArea(game);
     game.resources.clear();
     for (int i = 0; i < 900; ++i) {
         ResourceNode node {};
@@ -632,6 +667,20 @@ void seedWorld(GameState& game) {
         else if (roll < 92) { node.type = ResourceType::Bush; node.hp = node.maxHp = 4; }
         else { node.type = ResourceType::Crystal; node.hp = node.maxHp = 8; }
         node.pos = { x, y };
+        game.resources.push_back(node);
+    }
+    for (int i = 0; i < 80; ++i) {
+        ResourceNode node {};
+        node.pos = {
+            cultFortressCenter().x + randf(game, -350.0f, 350.0f),
+            cultFortressCenter().y + randf(game, -260.0f, 260.0f)
+        };
+        if (!isPassable(game, node.pos)) continue;
+        int roll = randi(game, 0, 99);
+        if (roll < 45) { node.type = ResourceType::Rock; node.hp = node.maxHp = 7; }
+        else if (roll < 70) { node.type = ResourceType::Crystal; node.hp = node.maxHp = 9; }
+        else if (roll < 88) { node.type = ResourceType::Bush; node.hp = node.maxHp = 4; }
+        else { node.type = ResourceType::Tree; node.hp = node.maxHp = 5; }
         game.resources.push_back(node);
     }
 }
@@ -711,8 +760,10 @@ void startNewGame(GameState& game) {
     game.darkMageRewardGranted = false;
     game.shrineClaimDay = 0;
     game.shrineDarkMagesSummoned = false;
+    game.inCultFortress = false;
     game.bossIntroTimer = 0.0f;
     game.bossShakeTimer = 0.0f;
+    game.teleportCooldown = 0.0f;
     game.villageBaseHp = 0;
     game.villageBaseMaxHp = 0;
     game.day = 1;
@@ -749,14 +800,14 @@ bool saveGame(GameState& game, int slot) {
     std::ofstream out(saveSlotPath(slot), std::ios::trunc);
     if (!out) return false;
 
-    out << "FGSAVE 13\n";
+    out << "FGSAVE 14\n";
     out << game.day << ' ' << game.dayTimer << ' ' << game.danger << ' ' << game.waveTimer << ' ' << static_cast<int>(game.selectedBuild) << ' ' << game.buildMode << ' ' << static_cast<int>(game.selectedJob) << ' ' << game.shopOpen << ' ' << static_cast<int>(game.activeShop) << '\n';
     out << game.currentStage << ' ' << game.totalWoodGathered << ' ' << game.totalStoneGathered << ' ' << game.totalFiberGathered << ' '
         << game.totalCrystalGathered << ' ' << game.totalMonsterKills << ' ' << game.totalDarkMageKills << ' ' << game.rescuedChildren << ' ' << game.bossSpawned << ' ' << game.bossDefeated << ' '
         << game.hasSword << ' ' << game.hasArmor << ' ' << game.hasPoisonUpgrade << ' '
         << game.stage4BanditKills << ' ' << game.stage4DarkMageKills << ' ' << game.villageEventStarted << ' ' << game.villageBaseDestroyed << ' '
         << game.emeraldDropped << ' ' << game.carryingEmerald << ' ' << game.emeraldDelivered << ' ' << game.darkMageRewardGranted << ' '
-        << game.villageBaseHp << ' ' << game.villageBaseMaxHp << ' ' << game.shrineClaimDay << ' ' << game.shrineDarkMagesSummoned << '\n';
+        << game.villageBaseHp << ' ' << game.villageBaseMaxHp << ' ' << game.shrineClaimDay << ' ' << game.shrineDarkMagesSummoned << ' ' << game.inCultFortress << '\n';
     out << game.bag.wood << ' ' << game.bag.stone << ' ' << game.bag.fiber << ' ' << game.bag.crystal << ' '
         << game.bag.vegetable << ' ' << game.bag.meat << ' ' << game.bag.fish << ' ' << game.bag.bomb << '\n';
     out << game.player.pos.x << ' ' << game.player.pos.y << ' ' << game.player.facing.x << ' ' << game.player.facing.y << ' '
@@ -800,7 +851,7 @@ bool loadGame(GameState& game, int slot) {
     std::string header;
     int version = 0;
     in >> header >> version;
-    if (!in || header != "FGSAVE" || (version != 12 && version != 13)) return false;
+    if (!in || header != "FGSAVE" || (version != 12 && version != 13 && version != 14)) return false;
 
     int selectedBuildInt = 0;
     int selectedJobInt = 0;
@@ -816,9 +867,12 @@ bool loadGame(GameState& game, int slot) {
         >> game.emeraldDropped >> game.carryingEmerald >> game.emeraldDelivered >> game.darkMageRewardGranted
         >> game.villageBaseHp >> game.villageBaseMaxHp >> game.shrineClaimDay;
     game.shrineDarkMagesSummoned = false;
+    game.inCultFortress = false;
     if (version >= 13) in >> game.shrineDarkMagesSummoned;
+    if (version >= 14) in >> game.inCultFortress;
     game.bossIntroTimer = 0.0f;
     game.bossShakeTimer = 0.0f;
+    game.teleportCooldown = 0.0f;
     in >> game.bag.wood >> game.bag.stone >> game.bag.fiber >> game.bag.crystal >> game.bag.vegetable >> game.bag.meat >> game.bag.fish >> game.bag.bomb;
     in >> game.player.pos.x >> game.player.pos.y >> game.player.facing.x >> game.player.facing.y
         >> game.player.speed >> game.player.hp >> game.player.maxHp >> game.player.level
@@ -904,21 +958,32 @@ void spawnMonster(GameState& game, int count) {
     float scale = difficultyFactor(game);
     for (int i = 0; i < count; ++i) {
         Monster monster {};
-        int rollSide = randi(game, 0, 99);
-        int side = 0;
-        if (rollSide < 52) side = 0;
-        else if (rollSide < 72) side = 1;
-        else if (rollSide < 92) side = 3;
-        else side = 2;
-        if (side == 0) monster.pos = { randf(game, 0.0f, WORLD_PIXEL_W), -40.0f };
-        if (side == 1) monster.pos = { WORLD_PIXEL_W + 40.0f, randf(game, 0.0f, WORLD_PIXEL_H) };
-        if (side == 2) monster.pos = { randf(game, 0.0f, WORLD_PIXEL_W), WORLD_PIXEL_H + 40.0f };
-        if (side == 3) monster.pos = { -40.0f, randf(game, 0.0f, WORLD_PIXEL_H) };
+        if (game.inCultFortress) {
+            float angle = randf(game, 0.0f, ALLEGRO_PI * 2.0f);
+            float rx = randf(game, 260.0f, 420.0f);
+            float ry = randf(game, 210.0f, 320.0f);
+            monster.pos = {
+                cultFortressCenter().x + std::cos(angle) * rx,
+                cultFortressCenter().y + std::sin(angle) * ry
+            };
+        } else {
+            int rollSide = randi(game, 0, 99);
+            int side = 0;
+            if (rollSide < 52) side = 0;
+            else if (rollSide < 72) side = 1;
+            else if (rollSide < 92) side = 3;
+            else side = 2;
+            if (side == 0) monster.pos = { randf(game, 0.0f, WORLD_PIXEL_W), -40.0f };
+            if (side == 1) monster.pos = { WORLD_PIXEL_W + 40.0f, randf(game, 0.0f, WORLD_PIXEL_H) };
+            if (side == 2) monster.pos = { randf(game, 0.0f, WORLD_PIXEL_W), WORLD_PIXEL_H + 40.0f };
+            if (side == 3) monster.pos = { -40.0f, randf(game, 0.0f, WORLD_PIXEL_H) };
+        }
 
         int roll = randi(game, 0, 99);
         if (game.currentStage == 2) roll = std::min(99, roll + 12);
         if (game.currentStage == 3) roll = std::min(99, roll + 16);
         if (game.currentStage >= 4) roll = std::min(99, roll + 24);
+        if (game.inCultFortress) roll = std::min(99, roll + 26);
         if (game.day >= 6 && randi(game, 0, 99) < std::min(28, game.day * 2 + game.currentStage * 5)) roll = 90;
 
         if (roll < 48) {
@@ -942,6 +1007,12 @@ void spawnMonster(GameState& game, int count) {
             monster.hp = monster.maxHp = static_cast<int>(40 + scale * 10.0f);
             monster.damage = static_cast<int>(11 + scale * 2.8f);
             monster.speed = 116.0f + scale * 7.0f;
+        }
+        if (game.inCultFortress) {
+            monster.hp = static_cast<int>(monster.hp * 1.28f);
+            monster.maxHp = monster.hp;
+            monster.damage = static_cast<int>(std::round(monster.damage * 1.22f));
+            monster.speed *= 1.12f;
         }
         game.monsters.push_back(monster);
     }
@@ -1050,6 +1121,31 @@ void damageMonster(GameState& game, Monster& monster, int damage) {
 
 void handleGather(GameState& game) {
     if (!game.controls.gather || game.player.gatherCooldown > 0.0f) return;
+
+    if (game.teleportCooldown <= 0.0f) {
+        if (!game.inCultFortress && distance(game.player.pos, cultPortalPos()) < 82.0f) {
+            game.inCultFortress = true;
+            game.player.pos = add(cultFortressPortalPos(), { 0.0f, 90.0f });
+            game.player.onBoat = false;
+            game.player.boatIndex = -1;
+            game.teleportCooldown = 1.1f;
+            game.player.gatherCooldown = 0.4f;
+            refreshDifficulty(game);
+            addMessage(game, "你踏入傳送點，已抵達邪教堡壘，難度倍增！", 4.6f);
+            return;
+        }
+        if (game.inCultFortress && distance(game.player.pos, cultFortressPortalPos()) < 82.0f) {
+            game.inCultFortress = false;
+            game.player.pos = add(cultPortalPos(), { 0.0f, 96.0f });
+            game.player.onBoat = false;
+            game.player.boatIndex = -1;
+            game.teleportCooldown = 1.1f;
+            game.player.gatherCooldown = 0.4f;
+            refreshDifficulty(game);
+            addMessage(game, "你穿過傳送點，回到了邊境據點。", 3.8f);
+            return;
+        }
+    }
 
     if (distance(game.player.pos, shrinePos()) < 78.0f) {
         if (!game.shrineDarkMagesSummoned) {
@@ -1448,6 +1544,7 @@ void updatePlayer(GameState& game, float dt) {
     game.player.coreRecallCooldown -= dt;
     game.player.alienBurstCooldown -= dt;
     game.player.alienSummonCooldown -= dt;
+    game.teleportCooldown = std::max(0.0f, game.teleportCooldown - dt);
     game.player.hunger = std::max(0.0f, game.player.hunger - dt * 1.15f);
     if (game.player.hunger <= 0.0f) {
         game.player.hungerDamageTimer -= dt;
@@ -1804,6 +1901,27 @@ void drawWorld(const GameState& game, ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titl
     if (distance(game.player.pos, shrinePos()) <= 96.0f) {
         al_draw_circle(shrine.x, shrine.y - 6.0f, 58.0f, al_map_rgba(255, 120, 140, 140), 3.0f);
     }
+    Vec2 cultPortal = worldToScreen(cultPortalPos(), camera);
+    float portalPulse = std::sin(game.dayTimer * 3.0f) * 8.0f;
+    al_draw_filled_circle(cultPortal.x, cultPortal.y, 26.0f + portalPulse * 0.25f, al_map_rgba(140, 74, 210, 180));
+    al_draw_circle(cultPortal.x, cultPortal.y, 40.0f + portalPulse * 0.4f, al_map_rgba(208, 174, 255, 180), 4.0f);
+    al_draw_text(bodyFont, al_map_rgb(242, 230, 255), cultPortal.x, cultPortal.y - 76.0f, ALLEGRO_ALIGN_CENTER, "傳送點");
+    if (distance(game.player.pos, cultPortalPos()) <= 100.0f && !game.inCultFortress) {
+        al_draw_text(bodyFont, al_map_rgb(222, 212, 255), cultPortal.x, cultPortal.y + 42.0f, ALLEGRO_ALIGN_CENTER, "按 E 前往邪教堡壘");
+    }
+    Vec2 fortressPortal = worldToScreen(cultFortressPortalPos(), camera);
+    al_draw_filled_circle(fortressPortal.x, fortressPortal.y, 28.0f + portalPulse * 0.2f, al_map_rgba(86, 32, 120, 190));
+    al_draw_circle(fortressPortal.x, fortressPortal.y, 42.0f + portalPulse * 0.35f, al_map_rgba(222, 172, 255, 170), 4.0f);
+    al_draw_text(bodyFont, al_map_rgb(240, 228, 255), fortressPortal.x, fortressPortal.y - 76.0f, ALLEGRO_ALIGN_CENTER, "堡壘傳送門");
+    Vec2 fortress = worldToScreen(cultFortressCenter(), camera);
+    al_draw_filled_rectangle(fortress.x - 220.0f, fortress.y - 160.0f, fortress.x + 220.0f, fortress.y + 160.0f, al_map_rgba(42, 18, 30, 110));
+    al_draw_rectangle(fortress.x - 240.0f, fortress.y - 180.0f, fortress.x + 240.0f, fortress.y + 180.0f, al_map_rgb(96, 52, 78), 6.0f);
+    al_draw_filled_triangle(fortress.x - 120.0f, fortress.y - 110.0f, fortress.x - 184.0f, fortress.y + 20.0f, fortress.x - 56.0f, fortress.y + 20.0f, al_map_rgb(70, 28, 42));
+    al_draw_filled_triangle(fortress.x + 120.0f, fortress.y - 110.0f, fortress.x + 56.0f, fortress.y + 20.0f, fortress.x + 184.0f, fortress.y + 20.0f, al_map_rgb(70, 28, 42));
+    al_draw_filled_rectangle(fortress.x - 160.0f, fortress.y + 18.0f, fortress.x + 160.0f, fortress.y + 112.0f, al_map_rgb(54, 34, 42));
+    al_draw_filled_rectangle(fortress.x - 34.0f, fortress.y - 6.0f, fortress.x + 34.0f, fortress.y + 112.0f, al_map_rgb(22, 12, 18));
+    al_draw_filled_circle(fortress.x, fortress.y - 42.0f, 20.0f, al_map_rgb(122, 32, 46));
+    al_draw_text(bodyFont, al_map_rgb(255, 220, 230), fortress.x, fortress.y - 220.0f, ALLEGRO_ALIGN_CENTER, "邪教堡壘");
     if (game.currentStage >= 4) {
         Vec2 village = worldToScreen(villageCenter(), camera);
         Vec2 base = worldToScreen(villageBasePos(), camera);
@@ -2032,6 +2150,8 @@ void drawMinimap(const GameState& game, float x, float y, float w, float h) {
         if (!building.alive) continue;
         al_draw_filled_circle(x + building.pos.x * scaleX, y + building.pos.y * scaleY, 3.0f, al_map_rgb(246, 215, 123));
     }
+    al_draw_filled_circle(x + cultPortalPos().x * scaleX, y + cultPortalPos().y * scaleY, 3.8f, al_map_rgb(214, 162, 255));
+    al_draw_filled_circle(x + cultFortressCenter().x * scaleX, y + cultFortressCenter().y * scaleY, 5.0f, al_map_rgb(124, 58, 88));
     for (const auto& child : game.children) {
         if (child.rescued) continue;
         al_draw_filled_circle(x + child.pos.x * scaleX, y + child.pos.y * scaleY, 3.5f, al_map_rgb(126, 255, 154));
@@ -2056,7 +2176,7 @@ void drawUi(const GameState& game, ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titleFo
     al_draw_text(titleFont, al_map_rgb(255, 244, 214), 36.0f, 28.0f, 0, "邊境據點");
     al_draw_textf(bodyFont, al_map_rgb(201, 226, 255), 38.0f, 78.0f, 0, "第 %d 天  %s", game.day, isNight(game) ? "夜襲中" : "白天探索");
     al_draw_textf(bodyFont, al_map_rgb(201, 226, 255), 38.0f, 110.0f, 0, "等級 %d  經驗 %d/%d", game.player.level, game.player.xp, game.player.xpToNext);
-    al_draw_textf(bodyFont, al_map_rgb(201, 226, 255), 38.0f, 142.0f, 0, "怪物 %d  危險值 %.1f", static_cast<int>(game.monsters.size()), game.danger);
+    al_draw_textf(bodyFont, game.inCultFortress ? al_map_rgb(255, 164, 182) : al_map_rgb(201, 226, 255), 38.0f, 142.0f, 0, "怪物 %d  危險值 %.1f  區域：%s", static_cast<int>(game.monsters.size()), game.danger, game.inCultFortress ? "邪教堡壘" : "邊境據點");
     al_draw_textf(bodyFont, al_map_rgb(255, 108, 126), 38.0f, 174.0f, 0, "永久紅寶石 %d", game.permanentRubies);
 
     drawProgressBar(552.0f, 24.0f, 320.0f, 22.0f, static_cast<float>(game.player.hp) / game.player.maxHp, al_map_rgba(20, 20, 20, 190), al_map_rgb(222, 88, 88));
@@ -2071,7 +2191,7 @@ void drawUi(const GameState& game, ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titleFo
     al_draw_filled_rounded_rectangle(18.0f, SCREEN_H - 176.0f, 900.0f, SCREEN_H - 18.0f, 16.0f, 16.0f, al_map_rgba(8, 12, 16, 210));
     al_draw_textf(bodyFont, al_map_rgb(255, 238, 205), 36.0f, SCREEN_H - 160.0f, 0, "木材 %d   石材 %d   纖維 %d   水晶 %d   菜 %d   肉 %d   魚 %d   炸彈 %d", game.bag.wood, game.bag.stone, game.bag.fiber, game.bag.crystal, game.bag.vegetable, game.bag.meat, game.bag.fish, game.bag.bomb);
     al_draw_textf(bodyFont, al_map_rgb(214, 230, 240), 36.0f, SCREEN_H - 124.0f, 0, "職業：%s   目前建築：%s   模式：%s   裝備：%s%s%s", jobName(game.player.jobClass), buildName(game.selectedBuild), game.buildMode ? "建造" : "戰鬥", game.hasSword ? "劍 " : "", game.hasArmor ? "盔甲 " : "", game.hasPoisonUpgrade ? "毒藥強化" : "");
-    al_draw_text(bodyFont, al_map_rgb(170, 202, 221), 36.0f, SCREEN_H - 92.0f, 0, "WASD 移動   E 採集 / 神社互動   Space 近戰   滑鼠左鍵 射擊 / 放置   G 毒藥水   H 釣魚   T 丟炸彈");
+    al_draw_text(bodyFont, al_map_rgb(170, 202, 221), 36.0f, SCREEN_H - 92.0f, 0, "WASD 移動   E 採集 / 神社互動 / 傳送   Space 近戰   滑鼠左鍵 射擊 / 放置   G 毒藥水   H 釣魚   T 丟炸彈");
     al_draw_text(bodyFont, al_map_rgb(170, 202, 221), 36.0f, SCREEN_H - 60.0f, 0, "Q 建造模式   1 圍牆   2 砲塔   3 營地   4 黑暗小法師   R 吃食物   J 職業技能   靠近街店可交易");
 
     al_draw_filled_rounded_rectangle(860.0f, 18.0f, SCREEN_W - 18.0f, 320.0f, 16.0f, 16.0f, al_map_rgba(8, 12, 16, 210));
