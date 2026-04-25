@@ -49,3 +49,5 @@ Makefile
 # clang / llvm
 *.dSYM/
 
+meta_rubies.txt
+/save_slots/

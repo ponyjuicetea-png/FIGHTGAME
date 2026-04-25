@@ -190,6 +190,7 @@ struct GameState {
     int totalFiberGathered = 0;
     int totalCrystalGathered = 0;
     int totalMonsterKills = 0;
+    int totalDarkMageKills = 0;
     int rescuedChildren = 0;
     int stage4BanditKills = 0;
     int stage4DarkMageKills = 0;
@@ -693,6 +694,7 @@ void startNewGame(GameState& game) {
     game.totalFiberGathered = 0;
     game.totalCrystalGathered = 0;
     game.totalMonsterKills = 0;
+    game.totalDarkMageKills = 0;
     game.rescuedChildren = 0;
     game.stage4BanditKills = 0;
     game.stage4DarkMageKills = 0;
@@ -747,7 +749,7 @@ bool saveGame(GameState& game, int slot) {
     out << "FGSAVE 12\n";
     out << game.day << ' ' << game.dayTimer << ' ' << game.danger << ' ' << game.waveTimer << ' ' << static_cast<int>(game.selectedBuild) << ' ' << game.buildMode << ' ' << static_cast<int>(game.selectedJob) << ' ' << game.shopOpen << ' ' << static_cast<int>(game.activeShop) << '\n';
     out << game.currentStage << ' ' << game.totalWoodGathered << ' ' << game.totalStoneGathered << ' ' << game.totalFiberGathered << ' '
-        << game.totalCrystalGathered << ' ' << game.totalMonsterKills << ' ' << game.rescuedChildren << ' ' << game.bossSpawned << ' ' << game.bossDefeated << ' '
+        << game.totalCrystalGathered << ' ' << game.totalMonsterKills << ' ' << game.totalDarkMageKills << ' ' << game.rescuedChildren << ' ' << game.bossSpawned << ' ' << game.bossDefeated << ' '
         << game.hasSword << ' ' << game.hasArmor << ' ' << game.hasPoisonUpgrade << ' '
         << game.stage4BanditKills << ' ' << game.stage4DarkMageKills << ' ' << game.villageEventStarted << ' ' << game.villageBaseDestroyed << ' '
         << game.emeraldDropped << ' ' << game.carryingEmerald << ' ' << game.emeraldDelivered << ' ' << game.darkMageRewardGranted << ' '
@@ -805,7 +807,7 @@ bool loadGame(GameState& game, int slot) {
     game.selectedJob = static_cast<JobClass>(selectedJobInt);
     game.activeShop = static_cast<ShopType>(activeShopInt);
     in >> game.currentStage >> game.totalWoodGathered >> game.totalStoneGathered >> game.totalFiberGathered
-        >> game.totalCrystalGathered >> game.totalMonsterKills >> game.rescuedChildren >> game.bossSpawned >> game.bossDefeated
+        >> game.totalCrystalGathered >> game.totalMonsterKills >> game.totalDarkMageKills >> game.rescuedChildren >> game.bossSpawned >> game.bossDefeated
         >> game.hasSword >> game.hasArmor >> game.hasPoisonUpgrade
         >> game.stage4BanditKills >> game.stage4DarkMageKills >> game.villageEventStarted >> game.villageBaseDestroyed
         >> game.emeraldDropped >> game.carryingEmerald >> game.emeraldDelivered >> game.darkMageRewardGranted
@@ -1017,6 +1019,7 @@ void damageMonster(GameState& game, Monster& monster, int damage) {
             al_play_sample(gMonsterDeathSample, 0.74f, 0.0f, pitch, ALLEGRO_PLAYMODE_ONCE, nullptr);
         }
         game.totalMonsterKills += 1;
+        if (monster.type == MonsterType::DarkMage) game.totalDarkMageKills += 1;
         if (game.currentStage == 4) {
             if (monster.type == MonsterType::DarkMage) game.stage4DarkMageKills += 1;
             if (monster.type == MonsterType::Hunter || monster.type == MonsterType::Brute) game.stage4BanditKills += 1;
@@ -1045,9 +1048,9 @@ void handleGather(GameState& game) {
     if (!game.controls.gather || game.player.gatherCooldown > 0.0f) return;
 
     if (distance(game.player.pos, shrinePos()) < 78.0f) {
-        if (game.stage4DarkMageKills < 4) {
+        if (game.totalDarkMageKills < 4) {
             game.player.gatherCooldown = 0.25f;
-            addMessage(game, ("神社封印尚未解除，必須先打敗 4 隻黑暗大法師。目前 " + std::to_string(game.stage4DarkMageKills) + " / 4。"), 3.8f);
+            addMessage(game, ("神社封印尚未解除，必須先打敗 4 隻黑暗大法師。目前 " + std::to_string(game.totalDarkMageKills) + " / 4。"), 3.8f);
         } else if (game.shrineClaimDay != game.day) {
             game.permanentRubies += 1;
             game.shrineClaimDay = game.day;
@@ -2071,7 +2074,7 @@ void drawUi(const GameState& game, ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titleFo
             "累計採集木材 50 / " + std::to_string(game.totalWoodGathered) + "\n"
             "累計採集石材 36 / " + std::to_string(game.totalStoneGathered) + "\n"
             "存活圍牆 6 / " + std::to_string(countBuildingsOfType(game, BuildingType::Wall)) + "\n"
-            "神社黑暗大法師 4 / " + std::to_string(std::min(game.stage4DarkMageKills, 4));
+            "神社黑暗大法師 4 / " + std::to_string(std::min(game.totalDarkMageKills, 4));
     } else if (game.currentStage == 2) {
         objectiveText =
             "第二關：鞏固防線並清怪\n"
