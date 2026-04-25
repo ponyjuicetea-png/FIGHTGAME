@@ -32,6 +32,7 @@ constexpr float BASE_Y = WORLD_PIXEL_H * 0.5f;
 constexpr double FPS = 60.0;
 constexpr const char* SAVE_DIR = "save_slots";
 constexpr const char* META_RUBY_FILE = "meta_rubies.txt";
+#define SHRINE_DARK_MAGE_SUMMON_COUNT 8
 
 enum class TileBiome { Grass, Meadow, Water, DarkGrass };
 enum class ResourceType { Tree, Rock, Bush, Crystal };
@@ -203,6 +204,7 @@ struct GameState {
     bool emeraldDelivered = false;
     bool darkMageRewardGranted = false;
     int shrineClaimDay = 0;
+    bool shrineDarkMagesSummoned = false;
     float bossIntroTimer = 0.0f;
     float bossShakeTimer = 0.0f;
     int villageBaseHp = 0;
@@ -472,13 +474,14 @@ void setupRescueChildren(GameState& game) {
     game.rescuedChildren = 0;
 }
 void spawnShrineDarkMages(GameState& game) {
-    const std::array<Vec2, 4> shrineMages = {{
-        { shrinePos().x - 120.0f, shrinePos().y + 40.0f },
-        { shrinePos().x + 120.0f, shrinePos().y + 30.0f },
-        { shrinePos().x - 56.0f, shrinePos().y + 132.0f },
-        { shrinePos().x + 62.0f, shrinePos().y + 144.0f }
-    }};
-    for (const auto& pos : shrineMages) {
+    constexpr float kSpawnRadiusX = 176.0f;
+    constexpr float kSpawnRadiusY = 138.0f;
+    for (int i = 0; i < SHRINE_DARK_MAGE_SUMMON_COUNT; ++i) {
+        float angle = (static_cast<float>(i) / static_cast<float>(SHRINE_DARK_MAGE_SUMMON_COUNT)) * 6.2831853f;
+        Vec2 pos {
+            shrinePos().x + std::cos(angle) * kSpawnRadiusX,
+            shrinePos().y + 76.0f + std::sin(angle) * kSpawnRadiusY
+        };
         Monster mage {};
         mage.type = MonsterType::DarkMage;
         mage.pos = pos;
@@ -502,8 +505,8 @@ void setupVillageEncounter(GameState& game) {
     game.villageBaseHp = 380;
 
     const std::array<Vec2, 4> mageSpawns = {{
-        { shrinePos().x - 120.0f, shrinePos().y + 40.0f },
-        { shrinePos().x + 120.0f, shrinePos().y + 30.0f },
+        { villageCenter().x - 210.0f, villageCenter().y - 110.0f },
+        { villageCenter().x - 40.0f, villageCenter().y + 138.0f },
         { villageCenter().x + 10.0f, villageCenter().y + 80.0f },
         { villageCenter().x + 180.0f, villageCenter().y - 150.0f }
     }};
@@ -707,6 +710,7 @@ void startNewGame(GameState& game) {
     game.emeraldDelivered = false;
     game.darkMageRewardGranted = false;
     game.shrineClaimDay = 0;
+    game.shrineDarkMagesSummoned = false;
     game.bossIntroTimer = 0.0f;
     game.bossShakeTimer = 0.0f;
     game.villageBaseHp = 0;
@@ -734,7 +738,6 @@ void startNewGame(GameState& game) {
     game.minions.clear();
     game.monsters.clear();
     seedWorld(game);
-    spawnShrineDarkMages(game);
     if (game.selectedJob == JobClass::Fisher) setupFishingBoats(game);
     resetCoreCamp(game);
     refreshDifficulty(game);
@@ -746,14 +749,14 @@ bool saveGame(GameState& game, int slot) {
     std::ofstream out(saveSlotPath(slot), std::ios::trunc);
     if (!out) return false;
 
-    out << "FGSAVE 12\n";
+    out << "FGSAVE 13\n";
     out << game.day << ' ' << game.dayTimer << ' ' << game.danger << ' ' << game.waveTimer << ' ' << static_cast<int>(game.selectedBuild) << ' ' << game.buildMode << ' ' << static_cast<int>(game.selectedJob) << ' ' << game.shopOpen << ' ' << static_cast<int>(game.activeShop) << '\n';
     out << game.currentStage << ' ' << game.totalWoodGathered << ' ' << game.totalStoneGathered << ' ' << game.totalFiberGathered << ' '
         << game.totalCrystalGathered << ' ' << game.totalMonsterKills << ' ' << game.totalDarkMageKills << ' ' << game.rescuedChildren << ' ' << game.bossSpawned << ' ' << game.bossDefeated << ' '
         << game.hasSword << ' ' << game.hasArmor << ' ' << game.hasPoisonUpgrade << ' '
         << game.stage4BanditKills << ' ' << game.stage4DarkMageKills << ' ' << game.villageEventStarted << ' ' << game.villageBaseDestroyed << ' '
         << game.emeraldDropped << ' ' << game.carryingEmerald << ' ' << game.emeraldDelivered << ' ' << game.darkMageRewardGranted << ' '
-        << game.villageBaseHp << ' ' << game.villageBaseMaxHp << ' ' << game.shrineClaimDay << '\n';
+        << game.villageBaseHp << ' ' << game.villageBaseMaxHp << ' ' << game.shrineClaimDay << ' ' << game.shrineDarkMagesSummoned << '\n';
     out << game.bag.wood << ' ' << game.bag.stone << ' ' << game.bag.fiber << ' ' << game.bag.crystal << ' '
         << game.bag.vegetable << ' ' << game.bag.meat << ' ' << game.bag.fish << ' ' << game.bag.bomb << '\n';
     out << game.player.pos.x << ' ' << game.player.pos.y << ' ' << game.player.facing.x << ' ' << game.player.facing.y << ' '
@@ -797,7 +800,7 @@ bool loadGame(GameState& game, int slot) {
     std::string header;
     int version = 0;
     in >> header >> version;
-    if (!in || header != "FGSAVE" || version != 12) return false;
+    if (!in || header != "FGSAVE" || (version != 12 && version != 13)) return false;
 
     int selectedBuildInt = 0;
     int selectedJobInt = 0;
@@ -812,6 +815,8 @@ bool loadGame(GameState& game, int slot) {
         >> game.stage4BanditKills >> game.stage4DarkMageKills >> game.villageEventStarted >> game.villageBaseDestroyed
         >> game.emeraldDropped >> game.carryingEmerald >> game.emeraldDelivered >> game.darkMageRewardGranted
         >> game.villageBaseHp >> game.villageBaseMaxHp >> game.shrineClaimDay;
+    game.shrineDarkMagesSummoned = false;
+    if (version >= 13) in >> game.shrineDarkMagesSummoned;
     game.bossIntroTimer = 0.0f;
     game.bossShakeTimer = 0.0f;
     in >> game.bag.wood >> game.bag.stone >> game.bag.fiber >> game.bag.crystal >> game.bag.vegetable >> game.bag.meat >> game.bag.fish >> game.bag.bomb;
@@ -877,7 +882,6 @@ bool loadGame(GameState& game, int slot) {
     game.boats.clear();
     game.minions.clear();
     game.monsters.clear();
-    if (game.currentStage == 1) spawnShrineDarkMages(game);
     if (game.player.jobClass == JobClass::Fisher) setupFishingBoats(game);
     game.scene = Scene::Playing;
     game.autoSaveTimer = 0.0f;
@@ -1048,7 +1052,12 @@ void handleGather(GameState& game) {
     if (!game.controls.gather || game.player.gatherCooldown > 0.0f) return;
 
     if (distance(game.player.pos, shrinePos()) < 78.0f) {
-        if (game.totalDarkMageKills < 4) {
+        if (!game.shrineDarkMagesSummoned) {
+            spawnShrineDarkMages(game);
+            game.shrineDarkMagesSummoned = true;
+            game.player.gatherCooldown = 0.45f;
+            addMessage(game, "黑暗大法師已被召喚", 3.6f);
+        } else if (game.totalDarkMageKills < 4) {
             game.player.gatherCooldown = 0.25f;
             addMessage(game, ("神社封印尚未解除，必須先打敗 4 隻黑暗大法師。目前 " + std::to_string(game.totalDarkMageKills) + " / 4。"), 3.8f);
         } else if (game.shrineClaimDay != game.day) {
@@ -2062,19 +2071,22 @@ void drawUi(const GameState& game, ALLEGRO_FONT* bodyFont, ALLEGRO_FONT* titleFo
     al_draw_filled_rounded_rectangle(18.0f, SCREEN_H - 176.0f, 900.0f, SCREEN_H - 18.0f, 16.0f, 16.0f, al_map_rgba(8, 12, 16, 210));
     al_draw_textf(bodyFont, al_map_rgb(255, 238, 205), 36.0f, SCREEN_H - 160.0f, 0, "木材 %d   石材 %d   纖維 %d   水晶 %d   菜 %d   肉 %d   魚 %d   炸彈 %d", game.bag.wood, game.bag.stone, game.bag.fiber, game.bag.crystal, game.bag.vegetable, game.bag.meat, game.bag.fish, game.bag.bomb);
     al_draw_textf(bodyFont, al_map_rgb(214, 230, 240), 36.0f, SCREEN_H - 124.0f, 0, "職業：%s   目前建築：%s   模式：%s   裝備：%s%s%s", jobName(game.player.jobClass), buildName(game.selectedBuild), game.buildMode ? "建造" : "戰鬥", game.hasSword ? "劍 " : "", game.hasArmor ? "盔甲 " : "", game.hasPoisonUpgrade ? "毒藥強化" : "");
-    al_draw_text(bodyFont, al_map_rgb(170, 202, 221), 36.0f, SCREEN_H - 92.0f, 0, "WASD 移動   E 採集 / 神社領紅寶石   Space 近戰   滑鼠左鍵 射擊 / 放置   G 毒藥水   H 釣魚   T 丟炸彈");
+    al_draw_text(bodyFont, al_map_rgb(170, 202, 221), 36.0f, SCREEN_H - 92.0f, 0, "WASD 移動   E 採集 / 神社互動   Space 近戰   滑鼠左鍵 射擊 / 放置   G 毒藥水   H 釣魚   T 丟炸彈");
     al_draw_text(bodyFont, al_map_rgb(170, 202, 221), 36.0f, SCREEN_H - 60.0f, 0, "Q 建造模式   1 圍牆   2 砲塔   3 營地   4 黑暗小法師   R 吃食物   J 職業技能   靠近街店可交易");
 
     al_draw_filled_rounded_rectangle(860.0f, 18.0f, SCREEN_W - 18.0f, 320.0f, 16.0f, 16.0f, al_map_rgba(8, 12, 16, 210));
     al_draw_textf(titleFont, al_map_rgb(255, 235, 183), 884.0f, 30.0f, 0, "目標 - 第 %d 關", game.currentStage);
     std::string objectiveText;
     if (game.currentStage == 1) {
+        std::string shrineObjective = game.shrineDarkMagesSummoned
+            ? ("神社黑暗大法師 4 / " + std::to_string(std::min(game.totalDarkMageKills, 4)))
+            : ("前往神社對話召喚黑暗大法師 " + std::to_string(SHRINE_DARK_MAGE_SUMMON_COUNT) + " 隻");
         objectiveText =
             "第一關：建立前線基地\n"
             "累計採集木材 50 / " + std::to_string(game.totalWoodGathered) + "\n"
             "累計採集石材 36 / " + std::to_string(game.totalStoneGathered) + "\n"
-            "存活圍牆 6 / " + std::to_string(countBuildingsOfType(game, BuildingType::Wall)) + "\n"
-            "神社黑暗大法師 4 / " + std::to_string(std::min(game.totalDarkMageKills, 4));
+            "存活圍牆 6 / " + std::to_string(countBuildingsOfType(game, BuildingType::Wall)) + "\n" +
+            shrineObjective;
     } else if (game.currentStage == 2) {
         objectiveText =
             "第二關：鞏固防線並清怪\n"
